@@ -1,3 +1,2 @@
-python-telegram-bot
-pandas
+python-telegram-bot==22.0
 openpyxl
