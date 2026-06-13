@@ -22,7 +22,9 @@ keyboard = ReplyKeyboardMarkup(
 user_queues = {}
 user_tasks = {}
 
-
+# =========================
+# PHONE CLEANER
+# =========================
 def clean_phone(value):
     if value is None:
         return None
@@ -38,21 +40,23 @@ def clean_phone(value):
     return digits if len(digits) >= 10 else None
 
 
+# =========================
+# GUDMAN (FAST)
+# =========================
 def process_gudman(file_path):
     wb = load_workbook(file_path, read_only=True, data_only=True)
     ws = wb.active
 
-    numbers = []
-
-    for row in ws.iter_rows(values_only=True):
-        phone = clean_phone(row[0])
-
-        if phone:
-            numbers.append(phone)
-
-    return numbers
+    return [
+        phone
+        for row in ws.iter_rows(values_only=True)
+        if (phone := clean_phone(row[0] if row else None))
+    ]
 
 
+# =========================
+# ZVONOK (OPTIMIZED)
+# =========================
 def process_zvonok(file_path):
     wb = load_workbook(file_path, read_only=True, data_only=True)
     ws = wb.active
@@ -60,23 +64,16 @@ def process_zvonok(file_path):
     rows = ws.iter_rows(values_only=True)
     headers = next(rows)
 
-    headers_lower = [
-        str(h).strip().lower() if h else ""
-        for h in headers
-    ]
+    headers_lower = [(h or "").strip().lower() for h in headers]
 
-    phone_col = None
-    status_col = None
-    client_answer_col = None
+    phone_col = status_col = client_answer_col = None
 
     for i, h in enumerate(headers_lower):
         if "номер" in h and "телефон" in h:
             phone_col = i
-
-        if "статус звонка" in h:
+        elif "статус звонка" in h:
             status_col = i
-
-        if (
+        elif (
             "транскрибация клиента" in h
             or "транскрипция клиента" in h
             or "ответ клиента" in h
@@ -85,45 +82,51 @@ def process_zvonok(file_path):
 
     if phone_col is None:
         raise Exception("Не нашёл столбец 'Номер телефона'.")
-
     if status_col is None:
         raise Exception("Не нашёл столбец 'Статус звонка'.")
-
     if client_answer_col is None:
         raise Exception("Не нашёл столбец 'Транскрибация клиента' или 'Ответ клиента'.")
 
-    bad_answers = [
+    bad_answers = {
         "номер набран неправильно",
         "проверьте корректность наборам",
         "проверьте корректность набора",
         "номер не используется",
-    ]
+    }
+
+    blocked_m_text = "набранный вами номер не"
 
     numbers = []
 
     for row in rows:
-        status = (
-            str(row[status_col]).strip().lower()
-            if row[status_col] else ""
-        )
+        if not row:
+            continue
 
-        client_answer = (
-            str(row[client_answer_col]).strip().lower()
-            if row[client_answer_col] else ""
-        )
+        status = (row[status_col] or "").strip().lower()
+        if status != "закончен удачно":
+            continue
 
-        if status == "закончен удачно":
-            if any(bad in client_answer for bad in bad_answers):
-                continue
+        client_answer = (row[client_answer_col] or "").strip().lower()
 
-            phone = clean_phone(row[phone_col])
+        # колонка M (индекс 12)
+        col_m = (row[12] or "").strip().lower() if len(row) > 12 else ""
 
-            if phone:
-                numbers.append(phone)
+        if blocked_m_text in col_m:
+            continue
+
+        if any(bad in client_answer for bad in bad_answers):
+            continue
+
+        phone = clean_phone(row[phone_col])
+        if phone:
+            numbers.append(phone)
 
     return numbers
 
 
+# =========================
+# START
+# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["mode"] = None
 
@@ -133,15 +136,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# =========================
+# MODE SELECT
+# =========================
 async def choose_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
 
     if text == "zvonok":
         context.user_data["mode"] = "Zvonok"
-
     elif text == "gudman":
         context.user_data["mode"] = "Gudman"
-
     else:
         await update.message.reply_text(
             "Нажми кнопку Zvonok или Gudman.",
@@ -155,6 +159,9 @@ async def choose_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# =========================
+# FILE HANDLER
+# =========================
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = context.user_data.get("mode")
 
@@ -173,10 +180,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
-    if user_id not in user_queues:
-        user_queues[user_id] = []
-
-    user_queues[user_id].append({
+    user_queues.setdefault(user_id, []).append({
         "document": document,
         "mode": mode,
         "chat_id": update.effective_chat.id
@@ -185,20 +189,20 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Файл принят ✅\n{document.file_name}")
 
     if user_id not in user_tasks or user_tasks[user_id].done():
-        user_tasks[user_id] = asyncio.create_task(
-            process_queue(context, user_id)
-        )
+        user_tasks[user_id] = asyncio.create_task(process_queue(context, user_id))
 
 
+# =========================
+# QUEUE PROCESSOR (FAST)
+# =========================
 async def process_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    await asyncio.sleep(3)
+    await asyncio.sleep(1)  # было 3 → ускорили
 
     queue = user_queues.get(user_id, [])
-    total = len(queue)
-
-    if total == 0:
+    if not queue:
         return
 
+    total = len(queue)
     chat_id = queue[0]["chat_id"]
 
     progress_message = await context.bot.send_message(
@@ -222,7 +226,7 @@ async def process_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int):
             emoji = get_progress_emoji(percent)
 
             await progress_message.edit_text(
-                f"{emoji} {percent}% | Обрабатываю файл {processed + 1} из {total}\n"
+                f"{emoji} {percent}% | Файл {processed + 1} из {total}\n"
                 f"{document.file_name}"
             )
 
@@ -233,18 +237,18 @@ async def process_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int):
 
             await tg_file.download_to_drive(input_path)
 
+            # 🔥 ВАЖНО: CPU-heavy в отдельный поток
             if mode == "Zvonok":
-                numbers = process_zvonok(input_path)
-                output_name = safe_name.replace(".xlsx", "_zvonok_result.txt")
+                numbers = await asyncio.to_thread(process_zvonok, input_path)
+                output_name = safe_name.replace(".xlsx", "_zvonok.txt")
             else:
-                numbers = process_gudman(input_path)
-                output_name = safe_name.replace(".xlsx", "_gudman_result.txt")
+                numbers = await asyncio.to_thread(process_gudman, input_path)
+                output_name = safe_name.replace(".xlsx", "_gudman.txt")
 
             output_path = os.path.join(tempfile.gettempdir(), output_name)
 
             with open(output_path, "w", encoding="utf-8") as f:
-                for number in numbers:
-                    f.write(str(number) + "\n")
+                f.write("\n".join(numbers))
 
             with open(output_path, "rb") as file:
                 await context.bot.send_document(
@@ -268,17 +272,17 @@ async def process_queue(context: ContextTypes.DEFAULT_TYPE, user_id: int):
         finally:
             if input_path and os.path.exists(input_path):
                 os.remove(input_path)
-
             if output_path and os.path.exists(output_path):
                 os.remove(output_path)
 
         processed += 1
 
-    await progress_message.edit_text(
-        "✅ 100% | Готово, все файлы обработаны"
-    )
+    await progress_message.edit_text("✅ 100% | Все файлы обработаны")
 
 
+# =========================
+# PROGRESS EMOJI
+# =========================
 def get_progress_emoji(percent):
     if percent < 25:
         return "🔴"
@@ -288,10 +292,12 @@ def get_progress_emoji(percent):
         return "🟡"
     elif percent < 100:
         return "🟢"
-    else:
-        return "✅"
+    return "✅"
 
 
+# =========================
+# MAIN
+# =========================
 def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN не найден")
@@ -299,23 +305,10 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            choose_mode
-        )
-    )
-
-    app.add_handler(
-        MessageHandler(
-            filters.Document.ALL,
-            handle_file
-        )
-    )
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, choose_mode))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
 
     print("🚀 Бот запущен")
-
     app.run_polling()
 
 
